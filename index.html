@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Scorpion</title>
+<style>
+  :root{ color-scheme: dark; }
+  html,body{ height:100%; margin:0; background:#000; overflow:hidden; }
+  canvas{ display:block; touch-action:none; }
+  .hint{
+    position:fixed; bottom:14px; left:50%; transform:translateX(-50%);
+    font:12px/1 monospace; color:#555; letter-spacing:.05em; opacity:.7;
+    pointer-events:none;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="hint">move your cursor — tap and drag on mobile</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize(){ W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+resize(); addEventListener('resize', resize);
+
+// ---- pointer ----
+const mouse = { x: innerWidth/2, y: innerHeight/2 };
+addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+addEventListener('touchmove', e => {
+  if(e.touches[0]){ mouse.x = e.touches[0].clientX; mouse.y = e.touches[0].clientY; }
+}, {passive:true});
+
+// ---- palette ----
+const INK = '#b3b3b3';   // soft grey used for every stroke and joint dot
+const FILL = '#000000';  // plate interior — same as the backdrop, so only the outline reads
+
+// ---- body chain ----
+const SCALE = 1.6;           // overall size multiplier
+const SEG_DIST = 17 * SCALE;
+const BODY_LEN = 13;         // longer, centipede-like segment count
+const TAIL_LEN = 6;          // segments curling up to the stinger
+const body = [];
+for(let i=0;i<BODY_LEN;i++) body.push({ x: mouse.x, y: mouse.y, angle: 0 });
+const tail = [];
+for(let i=0;i<TAIL_LEN;i++) tail.push({ x: mouse.x, y: mouse.y, angle: 0 });
+
+let t = 0;
+
+const GAP = 70 * SCALE; // keeps the scorpion a short distance from the cursor
+
+function updateBody(){
+  // head eases toward a point held back from the cursor, along the line it's already approaching from
+  const head = body[0];
+  const dx = mouse.x - head.x, dy = mouse.y - head.y;
+  const dist = Math.hypot(dx, dy) || 1;
+  const targetX = mouse.x - (dx/dist) * GAP;
+  const targetY = mouse.y - (dy/dist) * GAP;
+  head.x += (targetX - head.x) * 0.14;
+  head.y += (targetY - head.y) * 0.14;
+  head.angle = Math.atan2(mouse.y - head.y, mouse.x - head.x);
+
+  for(let i=1;i<body.length;i++){
+    const p = body[i], prev = body[i-1];
+    const a = Math.atan2(prev.y - p.y, prev.x - p.x);
+    p.angle = a;
+    p.x = prev.x - Math.cos(a) * SEG_DIST;
+    p.y = prev.y - Math.sin(a) * SEG_DIST;
+  }
+
+  // tail rises off the last body plate and curls, swaying gently
+  const root = body[BODY_LEN-1];
+  let curlAngle = root.angle + Math.PI; // point backward from travel direction
+  for(let i=0;i<tail.length;i++){
+    const lift = 0.34 + i*0.16;                       // progressively raises the tail
+    const sway = Math.sin(t*0.05 + i*0.6) * 0.12;
+    curlAngle += -lift + sway * (i/tail.length);
+    const prev = i===0 ? root : tail[i-1];
+    const dist = SEG_DIST * (i===0 ? 1 : 0.82);
+    tail[i].x = prev.x + Math.cos(curlAngle) * dist;
+    tail[i].y = prev.y + Math.sin(curlAngle) * dist;
+    tail[i].angle = curlAngle;
+  }
+}
+
+// ---- legs: 6 pairs, spaced two segments apart along the body ----
+const LEG_ATTACH = [1,3,5,7,9,11];
+const LEG_LEN = 42 * SCALE;
+const STEP_DIST = LEG_LEN * 0.55;   // how far a foot can stretch before it re-plants
+const LIFT = 8 * SCALE;             // how high a foot lifts mid-step
+const STEP_SPEED = 0.16;            // fraction of the step covered per frame
+
+// each foot is a persistent point that stays magnetically locked to the floor
+// until it's stretched too far, then it swings in one motion to a new spot
+const legs = LEG_ATTACH.flatMap(segIdx => [-1,1].map(side => {
+  const hip = body[segIdx];
+  return { segIdx, side, x: hip.x, y: hip.y, swinging:false, swingT:0, fromX:hip.x, fromY:hip.y, toX:hip.x, toY:hip.y };
+}));
+
+function updateLegs(){
+  legs.forEach(leg => {
+    const hip = body[leg.segIdx];
+    const spread = hip.angle + leg.side * (Math.PI/2 - 0.35);
+    const idealX = hip.x + Math.cos(spread) * LEG_LEN;
+    const idealY = hip.y + Math.sin(spread) * LEG_LEN;
+
+    if(!leg.swinging){
+      const stretched = Math.hypot(idealX - leg.x, idealY - leg.y) > STEP_DIST;
+      if(stretched){
+        leg.swinging = true;
+        leg.swingT = 0;
+        leg.fromX = leg.x; leg.fromY = leg.y;
+      }
+    }
+    if(leg.swinging){
+      // keep re-aiming at the current ideal spot in case the body is still moving
+      leg.toX = idealX; leg.toY = idealY;
+      leg.swingT += STEP_SPEED;
+      if(leg.swingT >= 1){
+        leg.x = leg.toX; leg.y = leg.toY;
+        leg.swinging = false;
+      } else {
+        leg.x = leg.fromX + (leg.toX - leg.fromX) * leg.swingT;
+        leg.y = leg.fromY + (leg.toY - leg.fromY) * leg.swingT;
+      }
+    }
+    // otherwise the foot stays exactly where it is — locked to the floor
+  });
+}
+
+function drawLeg(leg){
+  const hip = body[leg.segIdx];
+  const lift = leg.swinging ? Math.sin(leg.swingT * Math.PI) * LIFT : 0;
+  const footX = leg.x, footY = leg.y - lift;
+  // knee bows outward from the hip-foot line
+  const midX = (hip.x + footX)/2, midY = (hip.y + footY)/2;
+  const dx = footX - hip.x, dy = footY - hip.y;
+  const perp = Math.atan2(dy, dx) + leg.side * Math.PI/2;
+  const kneeX = midX + Math.cos(perp) * (LEG_LEN*0.32);
+  const kneeY = midY + Math.sin(perp) * (LEG_LEN*0.32);
+
+  ctx.beginPath();
+  ctx.moveTo(hip.x, hip.y);
+  ctx.lineTo(kneeX, kneeY);
+  ctx.lineTo(footX, footY);
+  ctx.stroke();
+
+  // joints and the foot get a small filled dot in the ink color
+  // (plate fill is the same as the background, so dots need their own fill)
+  ctx.fillStyle = INK;
+  ctx.beginPath(); ctx.arc(kneeX, kneeY, 2 * SCALE, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(footX, footY, 2.3 * SCALE, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = FILL;
+}
+
+function drawLegs(){
+  ctx.lineWidth = 1.4 * SCALE;
+  legs.forEach(drawLeg);
+}
+
+// ---- pincers ----
+function drawPincer(side){
+  const head = body[0];
+  const open = 0.25 + Math.max(Math.sin(t*0.05), 0) * 0.15;
+  const armAngle = head.angle + side * 0.55;
+  const armLen = 26 * SCALE;
+  const elbowX = head.x + Math.cos(armAngle)*armLen;
+  const elbowY = head.y + Math.sin(armAngle)*armLen;
+
+  const clawAngle = head.angle + side * 0.15;
+  const clawLen = 20 * SCALE;
+  const clawX = elbowX + Math.cos(clawAngle)*clawLen;
+  const clawY = elbowY + Math.sin(clawAngle)*clawLen;
+
+  ctx.lineWidth = 2.1 * SCALE;
+  ctx.beginPath();
+  ctx.moveTo(head.x, head.y);
+  ctx.lineTo(elbowX, elbowY);
+  ctx.lineTo(clawX, clawY);
+  ctx.stroke();
+
+  // two pincer tips, opening/closing
+  ctx.lineWidth = 1.6 * SCALE;
+  [1,-1].forEach(pinch => {
+    const a = clawAngle + pinch*open;
+    ctx.beginPath();
+    ctx.moveTo(clawX, clawY);
+    ctx.lineTo(clawX + Math.cos(a)*11*SCALE, clawY + Math.sin(a)*11*SCALE);
+    ctx.stroke();
+  });
+  ctx.fillStyle = INK;
+  ctx.beginPath(); ctx.arc(elbowX, elbowY, 2.5 * SCALE, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = FILL;
+}
+
+// angular chitin plate: a hexagonal outline instead of a smooth ellipse
+function drawPlate(len, width, spike){
+  ctx.beginPath();
+  ctx.moveTo(len, 0);
+  ctx.lineTo(len*0.3, -width);
+  ctx.lineTo(-len*0.7, -width*0.7);
+  if(spike) ctx.lineTo(-len*1.15, 0);
+  else ctx.lineTo(-len*0.9, 0);
+  ctx.lineTo(-len*0.7, width*0.7);
+  ctx.lineTo(len*0.3, width);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+}
+
+// ---- body plates + tail + stinger ----
+function drawBody(){
+  // spine ridge linking the plates
+  ctx.beginPath();
+  ctx.moveTo(body[0].x, body[0].y);
+  for(let i=1;i<BODY_LEN;i++) ctx.lineTo(body[i].x, body[i].y);
+  ctx.lineWidth = 0.8;
+  ctx.stroke();
+
+  ctx.lineWidth = 1.1 * SCALE;
+  for(let i=BODY_LEN-1;i>=0;i--){
+    const p = body[i];
+    const w = (14 - i*0.9) * SCALE;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.angle);
+    drawPlate(w*0.85, w*0.32, false);
+    ctx.restore();
+  }
+  for(let i=0;i<tail.length;i++){
+    const p = tail[i];
+    const w = (6 - i*0.5) * SCALE;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.angle);
+    drawPlate(w, w*0.4, true);
+    // small dorsal spine on each tail plate
+    ctx.beginPath();
+    ctx.moveTo(-w*0.2, -w*0.75);
+    ctx.lineTo(-w*0.2, -w*1.15);
+    ctx.stroke();
+    ctx.restore();
+  }
+  // stinger, barbed
+  const last = tail[tail.length-1];
+  const tipA = last.angle - 0.65;
+  const tipX = last.x + Math.cos(tipA)*14*SCALE;
+  const tipY = last.y + Math.sin(tipA)*14*SCALE;
+  ctx.beginPath();
+  ctx.moveTo(last.x, last.y);
+  ctx.lineTo(tipX, tipY);
+  ctx.stroke();
+  const barbA = tipA + 0.9;
+  ctx.beginPath();
+  ctx.moveTo(tipX, tipY);
+  ctx.lineTo(tipX - Math.cos(barbA)*5*SCALE, tipY - Math.sin(barbA)*5*SCALE);
+  ctx.stroke();
+}
+
+function frame(){
+  t++;
+  updateBody();
+  updateLegs();
+
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(0,0,W,H);
+
+  ctx.fillStyle = FILL;
+  ctx.strokeStyle = INK;
+
+  drawLegs();
+  drawBody();
+  drawPincer(1);
+  drawPincer(-1);
+
+  requestAnimationFrame(frame);
+}
+frame();
+</script>
+</body>
+</html>
